@@ -1,12 +1,40 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: fieldops_test
+          POSTGRES_USER: fieldops
+          POSTGRES_PASSWORD: fieldops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fieldops -d fieldops_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://fieldops:fieldops@localhost:5432/fieldops_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -r requirements.txt
-      - run: pytest -q
+      - name: Apply PostgreSQL migrations
+        run: alembic upgrade head
+      - name: Verify migration head
+        run: alembic current --check-heads
+      - name: Run API tests
+        env:
+          DATABASE_URL: sqlite:///./fieldops_test.db
+        run: pytest -q

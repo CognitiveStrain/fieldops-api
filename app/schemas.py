@@ -1,9 +1,12 @@
 from datetime import datetime
 from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 Priority = Literal["low", "medium", "high", "critical"]
 Status = Literal["open", "in_progress", "blocked", "done"]
+SortBy = Literal["id", "title", "priority", "status", "assignee", "created_at", "updated_at"]
+SortOrder = Literal["asc", "desc"]
 
 
 class WorkOrderCreate(BaseModel):
@@ -31,3 +34,4 @@ class WorkOrderRead(BaseModel):
     status: Status
     assignee: str | None
     created_at: datetime
+    updated_at: datetime
