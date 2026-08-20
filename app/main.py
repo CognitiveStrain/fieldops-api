@@ -1,18 +1,40 @@
-from fastapi import Depends, FastAPI, HTTPException, Query, status
-from sqlalchemy import select
+import logging
+import time
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.requests import Request
 
-from .database import Base, engine, get_db
+from .database import get_db
+from .logging_config import configure_logging
 from .models import WorkOrder
-from .schemas import WorkOrderCreate, WorkOrderRead, WorkOrderUpdate
+from .schemas import SortBy, SortOrder, WorkOrderCreate, WorkOrderRead, WorkOrderUpdate
 
-Base.metadata.create_all(bind=engine)
+configure_logging()
+logger = logging.getLogger("fieldops.api")
 
 app = FastAPI(
     title="FieldOps API",
-    version="1.0.0",
+    version="1.1.0",
     description="REST service for tracking engineering and operations work orders.",
 )
+
+
+@app.middleware("http")
+async def request_logging(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    logger.info(
+        "request completed",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+        },
+    )
+    return response
 
 
 @app.get("/health")
@@ -31,15 +53,30 @@ def create_work_order(payload: WorkOrderCreate, db: Session = Depends(get_db)):
 
 @app.get("/work-orders", response_model=list[WorkOrderRead])
 def list_work_orders(
+    response: Response,
     status_filter: str | None = Query(default=None, alias="status"),
     priority: str | None = None,
+    assignee: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+    sort_by: SortBy = "id",
+    sort_order: SortOrder = "desc",
     db: Session = Depends(get_db),
 ):
-    stmt = select(WorkOrder).order_by(WorkOrder.id.desc())
+    filters = []
     if status_filter:
-        stmt = stmt.where(WorkOrder.status == status_filter)
+        filters.append(WorkOrder.status == status_filter)
     if priority:
-        stmt = stmt.where(WorkOrder.priority == priority)
+        filters.append(WorkOrder.priority == priority)
+    if assignee:
+        filters.append(WorkOrder.assignee == assignee)
+
+    total = db.scalar(select(func.count()).select_from(WorkOrder).where(*filters)) or 0
+    response.headers["X-Total-Count"] = str(total)
+
+    sort_column = getattr(WorkOrder, sort_by)
+    order_clause = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+    stmt = select(WorkOrder).where(*filters).order_by(order_clause).offset(offset).limit(limit)
     return list(db.scalars(stmt))
 
 
