@@ -1,43 +1,98 @@
 # FieldOps API
 
-Production-style REST backend for tracking work orders in engineering and operations teams.
+Authenticated REST backend for tracking work orders in engineering and operations teams.
 
-FieldOps is the backend half of a small portfolio system: the separate [QAForge](https://github.com/CognitiveStrain/qaforge) repository runs automated API and browser tests against it.
+FieldOps is the backend half of a two-repository portfolio system: [QAForge](https://github.com/CognitiveStrain/qaforge) runs automated API and browser testing against it.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/CognitiveStrain/fieldops-api)
 
 ## Engineering focus
 
-- REST API design with FastAPI and Pydantic
+- FastAPI + Pydantic REST contracts
 - SQLAlchemy 2.x persistence
-- PostgreSQL production path with SQLite test/dev fallback
+- PostgreSQL production path with SQLite test fallback
 - Alembic database migrations
-- Filtering, pagination, sorting, and total-count metadata
-- Structured JSON request logging
-- Pytest API coverage
-- Docker + Docker Compose
+- JWT bearer authentication
+- scrypt password hashing with per-user random salts
+- role-based authorization (`viewer`, `technician`, `manager`, `admin`)
+- work-order creator ownership metadata
+- filtering, pagination, sorting, and `X-Total-Count`
+- structured JSON request logging
+- readiness and health probes
+- Docker Compose and Render infrastructure-as-code
 - GitHub Actions CI with a real PostgreSQL service
+
+## Authorization model
+
+| Role | Read | Create/update | Delete | Manage users/roles |
+| --- | --- | --- | --- | --- |
+| `viewer` | yes | no | no | no |
+| `technician` | yes | yes | no | no |
+| `manager` | yes | yes | yes | no |
+| `admin` | yes | yes | yes | yes |
+
+Public registration always creates a `viewer`. Elevated roles can only be assigned by an authenticated admin.
 
 ## API
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Health check |
-| `POST` | `/work-orders` | Create a work order |
-| `GET` | `/work-orders` | Filter, paginate, and sort work orders |
-| `GET` | `/work-orders/{id}` | Get one work order |
-| `PATCH` | `/work-orders/{id}` | Partially update a work order |
-| `DELETE` | `/work-orders/{id}` | Delete a work order |
+| Method | Endpoint | Access | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/` | public | Service metadata |
+| `GET` | `/health` | public | Process health |
+| `GET` | `/ready` | public | Database readiness |
+| `POST` | `/auth/register` | public | Register a viewer account |
+| `POST` | `/auth/token` | public | Exchange email/password for a JWT |
+| `GET` | `/auth/me` | authenticated | Current user |
+| `GET` | `/users` | admin | List users |
+| `PATCH` | `/users/{id}/role` | admin | Change a role |
+| `POST` | `/work-orders` | technician+ | Create a work order |
+| `GET` | `/work-orders` | authenticated | Filter, paginate, and sort |
+| `GET` | `/work-orders/{id}` | authenticated | Get one work order |
+| `PATCH` | `/work-orders/{id}` | technician+ | Partially update |
+| `DELETE` | `/work-orders/{id}` | manager+ | Delete |
 
-List queries support `status`, `priority`, `assignee`, `offset`, `limit`, `sort_by`, and `sort_order`. The response includes `X-Total-Count` so clients can implement pagination without changing the original list response shape.
+List queries support `status`, `priority`, `assignee`, `offset`, `limit`, `sort_by`, and `sort_order`.
 
-## Run with PostgreSQL
+## Local PostgreSQL stack
+
+Copy the example environment file and replace the placeholders:
 
 ```bash
-docker compose up --build
+cp .env.example .env
 ```
 
-The API becomes available at `http://localhost:8000` and interactive OpenAPI documentation at `http://localhost:8000/docs`.
+Then run:
 
-Compose waits for PostgreSQL, applies `alembic upgrade head`, then starts the API.
+```bash
+docker compose --env-file .env up --build
+```
+
+Compose waits for PostgreSQL, applies `alembic upgrade head`, then starts the API at `http://localhost:8000`. Interactive OpenAPI documentation is at `/docs`.
+
+## Authenticate
+
+Register a viewer:
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"viewer@example.com","password":"a-strong-password","full_name":"Example User"}'
+```
+
+Obtain a token using OAuth2 form fields (`username` contains the email):
+
+```bash
+curl -X POST http://127.0.0.1:8000/auth/token \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'username=admin@example.com&password=your-admin-password'
+```
+
+Use the returned access token:
+
+```bash
+curl http://127.0.0.1:8000/work-orders \
+  -H 'Authorization: Bearer YOUR_TOKEN'
+```
 
 ## Local SQLite workflow
 
@@ -49,33 +104,29 @@ alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-## Test
+For admin-only operations, set `BOOTSTRAP_ADMIN_EMAIL` and `BOOTSTRAP_ADMIN_PASSWORD` before starting the app.
+
+## Tests
 
 ```bash
-pytest -q
+python -m pytest -q
 ```
 
-CI additionally starts PostgreSQL and verifies that the migration chain reaches the current Alembic head before running the API test suite.
+The suite covers registration, login, invalid credentials/tokens, RBAC boundaries, admin role management, work-order ownership, lifecycle behavior, filtering, pagination, and validation. CI separately provisions PostgreSQL and validates the full migration chain.
 
-## Example
+## Deploy to Render
 
-```bash
-curl -X POST http://127.0.0.1:8000/work-orders \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Inspect compressor","priority":"high","assignee":"Kamal"}'
-```
+The repository contains a `render.yaml` Blueprint that provisions a public FastAPI web service and managed PostgreSQL database in Frankfurt. The Blueprint generates `JWT_SECRET` and prompts for the bootstrap admin email/password rather than committing credentials.
 
-```bash
-curl 'http://127.0.0.1:8000/work-orders?priority=high&sort_by=created_at&sort_order=desc&limit=20'
-```
+The free Render database is suitable for portfolio/demo use but currently expires after 30 days; use a persistent paid database for anything long-lived.
 
-## Why migrations instead of `create_all()`
+## Security
 
-`Base.metadata.create_all()` is useful for disposable databases and tests, but a long-lived application needs explicit, reviewable schema history. Alembic owns the application database lifecycle; tests may still create disposable SQLite tables directly for isolation and speed.
+See [SECURITY.md](SECURITY.md) for implemented controls, design decisions, and known limitations.
 
 ## Next steps
 
-- JWT authentication and role-based authorization
-- deployment to a public environment
-- observability/metrics
-- PostgreSQL-backed integration tests for more query paths
+- refresh-token rotation and explicit token revocation
+- persistent audit events for privileged actions
+- metrics/tracing
+- deployed QAForge smoke tests against the public environment
